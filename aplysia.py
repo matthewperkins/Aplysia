@@ -3,6 +3,7 @@ class ap_cell(object):
     def __init__(self, name_str, **kwds):
         super(ap_cell, self).__init__(**kwds)
         self._parse_name(name_str)
+        self._offset = 0
 
     def _parse_name(self, name):
         from mhp_re import bccl_cll_re, cbi_cll_re, crbrl_cll_re
@@ -29,16 +30,32 @@ how I expect, and I am confused.')
     def inst_freq(self):
         return (1/self.ISIs())
 
-    def inst_freq_intrp(self, xs, **kwds):
-        # linear interpolation by default
+    def inst_freq_intrp(self, xs, kind = 'zero', **kwds):
+        # zero interpolation by default, this creates a 'skyline'
+        # plot with frequencssy
+        # NB drop the last spike time, and pair the firts ISI with
+        # the first spike, this plays well weth the 'zero' interp
         from scipy import interpolate
+        from numpy import where, zeros, r_
         ys = self.inst_freq()
-        self.ln_f = interpolate.interp1d(xs, ys, **kwds)
-        return (self.ln_f(xs))
+        self.ln_f = interpolate.interp1d(self.evnt_times[0:-1], ys,
+                                         kind = kind, **kwds)
 
-    def nrm_times(self, anchor):
-        self._nrm_times = self.evnt_times - anchor
-        return (self._nrm_times)
+        # trim the new xs to zero if outside range:
+        l,h = (self.evnt_times[0], self.evnt_times[-2])
+        pre = xs[ where(xs<l) ]
+        post = xs[ where(xs>h) ]
+        xs = xs[where ((xs>l) & (xs<h)) ]
+        interp_ys = self.ln_f(xs)
+        # to keep the length the same, add back zeros outside of range
+        ys = r_[zeros(len(pre)), interp_ys, zeros(len(post))]
+        return (ys)
+            
+    def nrm_times(self, offset):
+        # to un-norm times, have to call again with self._offset*-1
+        self._offset = offset
+        self.evnt_times -= self._offset
+        return (self.evnt_times)
 
 class on_off_evnts(object):
     def __init__(self, name_str, a_times, **kwds):
@@ -143,12 +160,16 @@ class motor_programs(on_off_evnts):
         return (self.phs_swtch_times[self._cr_prg])
 
     def __iter__(self):
+        try:
+            del self._cr_prg
+        except AttributeError:
+            pass
         return (self)
 
     def next(self):
         try:
             self._cr_prg += 1
-            if (self._cr_prg+1> self._num_prgs-1):
+            if (self._cr_prg > (self._num_prgs-1)):
                 raise StopIteration            
         except AttributeError:
             self._cr_prg = 0
@@ -224,9 +245,34 @@ class experiment(object):
 
 
     def __iter__(self):
+        try:
+            del self._cr_cnd
+        except AttributeError:
+            pass
         return (self)
 
-def main(filename):
+def quick_plot(expt, prog, cell_str, ax, **kwds):
+    from matt_axes_cust import clean_axes
+    from numpy import r_
+    if 'ylim' in kwds.keys():
+        ylim = kwds.pop('ylim')
+    else: ylim = (0,15)
+    if 'xlim' in kwds.keys():
+        xlim = kwds.pop('xlim')
+    else: xlim = (-40,20)
+    clean_axes(ax, **kwds)
+    xs = r_[xlim[0]:xlim[1]:0.4]
+    prog_swtch_time = prog.phs_swtch_time()
+    # norm spike times
+    exec("expt.%s.nrm_times(prog_swtch_time)[1:]" % (cell_str))
+    exec("ys = expt.%s.inst_freq_intrp(xs)" % (cell_str))
+    # un-norm spike time
+    exec("expt.%s.nrm_times(prog_swtch_time*-1)[1:]" % (cell_str))
+    ax.plot(xs, ys)
+    ax.set_ylim(ylim)
+    ax.set_xlim(xlim)
+
+def main(filename, ylim = (0,15), xlim = (-40,20)):
     # construct experiment from header
     import spk2_mp
     conds, stims, mps, cells = spk2_mp.main(filename)
@@ -249,8 +295,10 @@ def main(filename):
         expt.add_cell(tmpcell)
 
     # now getting into plotting and the like, have to split this off somehow.
+    # figure out max num prgs in any one condition
+    max_prgs = max([cnd._num_prgs for cnd in expt])
     import matplotlib.gridspec as gridspec
-    nrow = 10
+    nrow = max_prgs
     ncol = 3
     plt_counter = 0
     gs = gridspec.GridSpec(nrow,ncol)
@@ -259,16 +307,39 @@ def main(filename):
     # save the bottom row for the averages (row-1)
     from pylab import plt
     for col_num, cond in enumerate(expt):
+        if col_num == 0: left_most = True
+        else: left_most = False
         for row_num, prog in enumerate(cond):
+            if row_num == (cond._num_prgs - 1): bottom_most = True
+            else: bottom_most = False
             ax = plt.subplot(gs[row_num,col_num])
-            xs = expt.b48.nrm_times(prog.phs_swtch_time())[1:]
-            ys = expt.b48.inst_freq()
-            ax.plot(xs, ys)
-            ax.set_ylim((0,15))
-            ax.set_xlim((-50,20))
+            quick_plot(expt, prog, 'b48', ax,
+                       left_most = left_most, bottom_most = bottom_most,
+                       ylim = ylim, xlim = xlim)
             if row_num == nrow - 1:
                 break
-    plt.show()
+    expt.b48_fig = plt.gcf()
+    expt.b48_fig.set_size_inches((7.5,10))
+    
+    # plot both b48 and b8
+    # save the bottom row for the averages (row-1)
+    for col_num, cond in enumerate(expt):
+        if col_num == 0: left_most = True
+        else: left_most = False
+        for row_num, prog in enumerate(cond):
+            if row_num == (cond._num_prgs - 1): bottom_most = True
+            else: bottom_most = False
+            ax = plt.subplot(gs[row_num,col_num])
+            quick_plot(expt, prog, 'b48', ax,
+                       left_most = left_most, bottom_most = bottom_most,
+                       ylim = ylim, xlim = xlim)
+            quick_plot(expt, prog, 'b8', ax,
+                       left_most = left_most, bottom_most = bottom_most,
+                       ylim = ylim, xlim = xlim)
+            # if row_num == nrow:
+            #     break
+    expt.b8_b48_fig = plt.gcf()
+    expt.b8_b48_fig.set_size_inches((7.5,10))
     return (expt)
 
 if __name__ == '__main__':
